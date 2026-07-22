@@ -1,0 +1,11 @@
+streamlit>=1.60,<2
+pandas>=2.3,<3
+numpy>=2.3,<3
+yfinance>=1.1,<2
+feedparser>=6,<7
+requests>=2.32,<3
+beautifulsoup4>=4.12,<5
+openai>=1.100,<2
+chromadb>=1.0,<2
+plotly>=6,<7
+python-dotenv>=1,<2
