@@ -11,38 +11,32 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
-from dotenv import load_dotenv
-from openai import OpenAI
+from huggingface_hub import InferenceClient
+from huggingface_hub.utils import HfHubHTTPError
 from plotly.subplots import make_subplots
 
+import config
 
-load_dotenv()
 st.set_page_config(page_title="주가 분석 AI", layout="wide")
 
-REQUEST_TIMEOUT = 15
-CHROMA_PATH = "./chroma_db"
-EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-CHAT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "stock-analysis-app contact@example.com")
 
-
-def api_key() -> str | None:
+def huggingface_api_key() -> str | None:
     """Read a key from Streamlit secrets first, then local environment variables."""
     try:
-        secrets_key = st.secrets.get("OPENAI_API_KEY")
+        secrets_key = st.secrets.get("HUGGINGFACE_API_KEY")
     except Exception:
         secrets_key = None
-    return secrets_key or os.getenv("OPENAI_API_KEY")
+    return secrets_key or config.HUGGINGFACE_API_KEY
 
 
 @st.cache_resource
-def openai_client(key: str) -> OpenAI:
-    return OpenAI(api_key=key)
+def huggingface_client(key: str) -> InferenceClient:
+    return InferenceClient(token=key)
 
 
 @st.cache_resource
 def chroma_client() -> chromadb.PersistentClient:
-    return chromadb.PersistentClient(path=CHROMA_PATH)
+    return chromadb.PersistentClient(path=config.CHROMA_PATH)
 
 
 @st.cache_data(ttl="1h", max_entries=50, show_spinner=False)
@@ -92,7 +86,7 @@ def load_news(ticker: str) -> list[dict[str, str]]:
             "https://news.google.com/rss/search?q="
             f"{quote_plus(query)}&hl={locale}&gl={country}&ceid={country}:{language}"
         )
-        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        response = requests.get(url, timeout=config.REQUEST_TIMEOUT)
         response.raise_for_status()
         feed = feedparser.parse(response.content)
         for entry in feed.entries[:10]:
@@ -110,11 +104,11 @@ def load_news(ticker: str) -> list[dict[str, str]]:
 @st.cache_data(ttl="24h", max_entries=50, show_spinner=False)
 def load_sec_filings(ticker: str) -> list[dict[str, str]]:
     """Fetch recent SEC filing metadata using the official submissions endpoint."""
-    headers = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
+    headers = {"User-Agent": config.SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
     tickers = requests.get(
         "https://www.sec.gov/files/company_tickers.json",
         headers=headers,
-        timeout=REQUEST_TIMEOUT,
+        timeout=config.REQUEST_TIMEOUT,
     )
     tickers.raise_for_status()
     match = next(
@@ -128,7 +122,7 @@ def load_sec_filings(ticker: str) -> list[dict[str, str]]:
     submissions = requests.get(
         f"https://data.sec.gov/submissions/CIK{cik}.json",
         headers=headers,
-        timeout=REQUEST_TIMEOUT,
+        timeout=config.REQUEST_TIMEOUT,
     )
     submissions.raise_for_status()
     recent = submissions.json().get("filings", {}).get("recent", {})
@@ -172,13 +166,13 @@ def rebuild_vector_store(ticker: str, documents: list[dict[str, str]], key: str)
     except Exception:
         pass
     collection = client.create_collection(name=name, metadata={"ticker": ticker.upper()})
-    llm_client = openai_client(key)
+    llm_client = huggingface_client(key)
     texts = [document["text"] for document in documents]
-    response = llm_client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+    embeddings = llm_client.feature_extraction(model=config.HUGGINGFACE_EMBEDDING_MODEL, text=texts)
     collection.add(
         ids=[f"{ticker.upper()}-{index}" for index in range(len(documents))],
         documents=texts,
-        embeddings=[item.embedding for item in response.data],
+        embeddings=embeddings.tolist(),
         metadatas=[
             {"source": item["source"], "published_date": item["published_date"], "type": item["type"]}
             for item in documents
@@ -189,27 +183,30 @@ def rebuild_vector_store(ticker: str, documents: list[dict[str, str]], key: str)
 
 def answer_question(ticker: str, question: str, key: str) -> tuple[str, list[dict[str, str]]]:
     collection = chroma_client().get_collection(collection_name(ticker))
-    llm_client = openai_client(key)
-    question_embedding = llm_client.embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=[question],
-    ).data[0].embedding
-    result = collection.query(query_embeddings=[question_embedding], n_results=5)
+    llm_client = huggingface_client(key)
+    question_embedding = llm_client.feature_extraction(
+        model=config.HUGGINGFACE_EMBEDDING_MODEL,
+        text=question,
+    ).tolist()
+    result = collection.query(query_embeddings=question_embedding, n_results=5)
     texts = result.get("documents", [[]])[0]
     metadata = result.get("metadatas", [[]])[0]
     sources = [{"text": text, **item} for text, item in zip(texts, metadata)]
     context = "\n\n".join(f"[{index + 1}] {text}" for index, text in enumerate(texts))
-    prompt = (
+    base_prompt = (
         "당신은 금융 분석 보조자입니다. 제공된 문맥에만 근거해 한국어로 답하세요. "
         "투자 조언으로 단정하지 말고, 문맥이 부족하면 부족하다고 명시하세요.\n\n"
         f"문맥:\n{context}\n\n질문: {question}"
     )
-    response = llm_client.chat.completions.create(
-        model=CHAT_MODEL,
-        temperature=0,
-        messages=[{"role": "user", "content": prompt}],
+    # Gemma instruction format
+    prompt = f"<start_of_turn>user\n{base_prompt}<end_of_turn>\n<start_of_turn>model\n"
+    response = llm_client.text_generation(
+        model=config.HUGGINGFACE_CHAT_MODEL,
+        prompt=prompt,
+        max_new_tokens=1024,
+        temperature=0.1,
     )
-    return response.choices[0].message.content or "응답을 생성하지 못했습니다.", sources
+    return response or "응답을 생성하지 못했습니다.", sources
 
 
 def stock_figure(data: pd.DataFrame, ticker: str) -> go.Figure:
@@ -262,11 +259,11 @@ for state_key, default in {
 }.items():
     st.session_state.setdefault(state_key, default)
 
-key = api_key()
+key = huggingface_api_key()
 st.title("주가 분석 AI")
 st.caption("시장 데이터, 뉴스, SEC 공시 메타데이터를 바탕으로 분석합니다.")
 if not key:
-    st.error("OPENAI_API_KEY를 Streamlit secrets 또는 환경 변수에 설정하세요.")
+    st.error("HUGGINGFACE_API_KEY를 Streamlit secrets 또는 환경 변수에 설정하세요.")
     st.stop()
 
 with st.sidebar:
@@ -298,7 +295,7 @@ if prepare:
             st.sidebar.success(f"{count}개 문서를 준비했습니다.")
         except requests.RequestException as error:
             st.sidebar.error(f"데이터 수집에 실패했습니다: {error}")
-        except Exception as error:
+        except (Exception, HfHubHTTPError) as error:
             st.sidebar.error(f"분석 준비에 실패했습니다: {error}")
 
 view = st.segmented_control(
@@ -328,7 +325,7 @@ if view == "AI 분석":
                     answer, sources = answer_question(st.session_state.ticker, question, key)
                 st.session_state.analysis_result = answer
                 st.session_state.analysis_sources = sources
-            except Exception as error:
+            except (Exception, HfHubHTTPError) as error:
                 st.error(f"AI 분석에 실패했습니다: {error}")
     if st.session_state.analysis_result:
         st.subheader("분석 결과")
