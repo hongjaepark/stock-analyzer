@@ -16,7 +16,7 @@ CHROMA_PATH = "./chroma_db"
 # It's recommended to use a User Access Token from Hugging Face for higher rate limits.
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 HUGGINGFACE_EMBEDDING_MODEL = os.getenv("HUGGINGFACE_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-HUGGINGFACE_CHAT_MODEL = os.getenv("HUGGINGFACE_CHAT_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")
+HUGGINGFACE_CHAT_MODEL = os.getenv("HUGGINGFACE_CHAT_MODEL", "Qwen/Qwen2.5-3B-Instruct")
 
 # --- SEC EDGAR API Settings ---
 # SEC에 요청 시 제공할 User-Agent. SEC의 정책에 따라 이메일 주소를 포함하는 것이 좋습니다.

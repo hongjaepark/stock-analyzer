@@ -16,6 +16,7 @@ from huggingface_hub.utils import HfHubHTTPError
 from plotly.subplots import make_subplots
 
 import config
+from llm_utils import run_chat_completion
 
 st.set_page_config(page_title="주가 분석 AI", layout="wide")
 
@@ -198,12 +199,12 @@ def answer_question(ticker: str, question: str, key: str) -> tuple[str, list[dic
         "투자 조언으로 단정하지 말고, 문맥이 부족하면 부족하다고 명시하세요.\n\n"
         f"문맥:\n{context}\n\n질문: {question}"
     )
-    # Gemma와 같은 대화형 모델은 'chat_completion'을 사용해야 합니다.
-    # 이 메서드는 메시지 목록을 받아 모델에 맞는 형식으로 자동 변환합니다.
-    response = llm_client.chat_completion(
+    # 특정 모델이 제공자에서 거부되면 다음 후보 모델로 자동 전환합니다.
+    response, _ = run_chat_completion(
+        llm_client,
         model=config.HUGGINGFACE_CHAT_MODEL,
         messages=[{"role": "user", "content": base_prompt}],
-        max_tokens=1024,  # chat_completion은 max_tokens를 사용합니다.
+        max_tokens=1024,
         temperature=0.1,
     )
     answer = response.choices[0].message.content
